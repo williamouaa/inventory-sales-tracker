@@ -1,20 +1,47 @@
 import re
-import requests
-from bs4 import BeautifulSoup
 from statistics import median
 from typing import Any, Dict, List
 
+import requests
+from bs4 import BeautifulSoup
 
-# Regex to find things like $9.99, $129, $1,234.56, etc.
-PRICE_PATTERN = re.compile(r"\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?")
+# ------------ config & helpers ------------
+
+# Matches things like: $9.99, US $129.99, $1,234.56, 99.00, etc.
+PRICE_PATTERN = re.compile(r"(?:US\s*)?\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?")
+
+# Common accessory / junk keywords to skip
+ACCESSORY_KEYWORDS = [
+    "case",
+    "charger",
+    "cable",
+    "screen protector",
+    "protector",
+    "adapter",
+    "dock",
+    "stand",
+    "mount",
+    "holder",
+    "skin",
+    "cover",
+    "glass",
+    "tempered",
+    "wallet",
+    "strap",
+    "band",
+    "cord",
+    "hub",
+    "battery",
+    "power bank",
+    "charging pad",
+]
+
+# Very common words we ignore when matching query to title
+QUERY_STOPWORDS = {"for", "the", "a", "an", "and", "or", "new", "brand"}
 
 
 def clean_price(price_str: str) -> float | None:
-    """
-    Convert a price string like '$129.99' or '$10.50 to $15.00'
-    into a float (e.g., 129.99 or 10.50).
-    Returns None if it cannot be parsed.
-    """
+    """Convert 'US $129.99' or '$10.50 to $15.00' into a float."""
     if not price_str:
         return None
 
@@ -22,8 +49,8 @@ def clean_price(price_str: str) -> float | None:
     if "to" in price_str:
         price_str = price_str.split("to")[0].strip()
 
-    # Remove $ and commas and spaces
-    price_str = price_str.replace("$", "").replace(",", "").strip()
+    # Remove 'US', '$', commas and spaces
+    price_str = price_str.replace("US", "").replace("$", "").replace(",", "").strip()
 
     # Keep only the first "word" that looks like a number
     parts = price_str.split()
@@ -36,39 +63,57 @@ def clean_price(price_str: str) -> float | None:
         return None
 
 
-def get_item_value(
-    search_term: str,
-    max_results: int = 20,
-    save_debug: bool = False,
-) -> Dict[str, Any]:
+def normalize(text: str) -> str:
+    return re.sub(r"[^a-z0-9\s]", " ", text.lower())
+
+
+def tokenize(text: str) -> List[str]:
+    return [t for t in normalize(text).split() if t]
+
+
+def important_query_tokens(query: str) -> List[str]:
+    """Tokens we require to be present in the title for an 'exact model' match."""
+    tokens = tokenize(query)
+    return [t for t in tokens if t not in QUERY_STOPWORDS]
+
+
+def looks_like_accessory(title: str) -> bool:
+    t = title.lower()
+    return any(word in t for word in ACCESSORY_KEYWORDS)
+
+
+def title_exact_match(title: str, query: str) -> bool:
     """
-    Search eBay for `search_term`, collect some prices,
-    and return stats about those prices.
+    Exact-model behavior: every important query token must appear in the title.
+    e.g. 'iphone 11' -> title must contain BOTH 'iphone' and '11'.
+    """
+    title_tokens = set(tokenize(title))
+    q_tokens = important_query_tokens(query)
+    if not q_tokens:
+        return True
+    return all(t in title_tokens for t in q_tokens)
 
-    Parameters
-    ----------
-    search_term : str
-        The item to search for.
-    max_results : int, optional
-        Maximum number of price matches to use (default 20).
-    save_debug : bool, optional
-        If True, save the raw HTML to ebay_debug.html (default False).
 
-    Returns
-    -------
-    dict with keys:
-        query           - the search term
-        raw_prices      - list of '$xx.xx' strings
-        cleaned_prices  - list of floats (filtered & cleaned)
-        count           - how many prices used
-        average_price   - mean of cleaned_prices
-        median_price    - median of cleaned_prices
-        min_price       - minimum price
-        max_price       - maximum price
-        error           - error message if something went wrong, else None
+# ------------ main scraper ------------
+
+def get_item_value_sold_new(search_term: str, max_results: int = 5) -> Dict[str, Any]:
+    """
+    Use requests + BeautifulSoup to search eBay for `search_term`:
+      - SOLD items only
+      - NEW condition only
+      - Uses the most recent `max_results` sold items (default 5)
+      - Requires every important query token in the title
+      - Filters out obvious accessories
     """
     url = "https://www.ebay.com/sch/i.html"
-    params = {"_nkw": search_term}
+
+    params = {
+        "_nkw": search_term,
+        "LH_Sold": "1",
+        "LH_Complete": "1",
+        "LH_ItemCondition": "1000",  # New
+        "_sop": "13",                # End date: recent first
+    }
 
     headers = {
         "User-Agent": (
@@ -82,7 +127,6 @@ def get_item_value(
         resp = requests.get(url, params=params, headers=headers, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as e:
-        # Network / HTTP error – return a result with error info
         return {
             "query": search_term,
             "raw_prices": [],
@@ -96,31 +140,79 @@ def get_item_value(
         }
 
     html = resp.text
+    soup = BeautifulSoup(html, "html.parser")
 
-    if save_debug:
-        with open("ebay_debug.html", "w", encoding="utf-8") as f:
-            f.write(html)
+    # DEBUG: save HTML once if you ever need to inspect layout
+    with open("ebay_debug.html", "w", encoding="utf-8") as f:
+        f.write(html)
 
-    # Find all dollar-looking prices in the HTML
-    matches = PRICE_PATTERN.findall(html)
+    # ---- LISTING SELECTION ----
+    # New SOLD layout uses card containers; class usually contains 'card-container'
+    listings = soup.select("div[class*='card-container']")
 
-    # Limit to max_results
-    raw_prices = matches[:max_results]
+    # Fallback to old-style layout if nothing found
+    if not listings:
+        listings = soup.select("li.s-item")
+    if not listings:
+        listings = soup.select("div.s-item__info.clearfix")
+    if not listings:
+        listings = soup.select("div.s-item__info")
 
-    # Clean and filter prices
+    print(f"[DEBUG] Found {len(listings)} potential listings for '{search_term}'")
+
+    raw_prices: List[str] = []
+
+    for idx, li in enumerate(listings):
+        # --- Title extraction ---
+        # Strategy: first <a> with an /itm/ link (that should be the listing title)
+        title_link = li.select_one("a[href*='/itm/']")
+        if not title_link:
+            continue
+
+        title_text = title_link.get_text(strip=True)
+        if not title_text:
+            continue
+
+        # Skip generic promo tiles
+        if "shop on ebay" in title_text.lower():
+            continue
+
+        # Exact-model match & accessory filter
+        if not title_exact_match(title_text, search_term):
+            continue
+        if looks_like_accessory(title_text):
+            continue
+
+        # --- Price extraction ---
+        # Grab all text inside this card and search for a $price pattern
+        card_text = li.get_text(" ", strip=True)
+        m = PRICE_PATTERN.search(card_text)
+        if not m:
+            continue
+
+        price_str = m.group()
+
+        print(f"[DEBUG] Title #{idx}: {title_text}  |  Price text: {price_str}")
+
+        raw_prices.append(price_str)
+
+        if len(raw_prices) >= max_results:
+            break
+
     cleaned = [clean_price(p) for p in raw_prices]
-    # drop invalid and zero prices (like "$0 shipping")
     cleaned = [c for c in cleaned if c is not None and c > 0]
 
     count = len(cleaned)
 
     if count == 0:
         avg = med = min_p = max_p = 0.0
+        error = "No matching sold NEW listings found."
     else:
         avg = sum(cleaned) / count
         med = float(median(cleaned))
         min_p = min(cleaned)
         max_p = max(cleaned)
+        error = None
 
     return {
         "query": search_term,
@@ -131,24 +223,24 @@ def get_item_value(
         "median_price": med,
         "min_price": min_p,
         "max_price": max_p,
-        "error": None,
+        "error": error,
     }
 
 
-def get_multiple_items_values(
-    terms: List[str],
-    max_results: int = 20,
-) -> List[Dict[str, Any]]:
-    """
-    Convenience helper: get stats for multiple items at once.
+# ------------ quick test harness ------------
 
-    Example:
-        results = get_multiple_items_values(
-            ["iphone 11", "ps4 controller", "nike shoes"]
-        )
-    """
-    results = []
-    for term in terms:
-        result = get_item_value(term, max_results=max_results)
-        results.append(result)
-    return results
+if __name__ == "__main__":
+    test_terms = ["iphone 11", "ps4 controller", "pokemon emerald"]
+
+    for term in test_terms:
+        print("==========")
+        print("Query:", term)
+        result = get_item_value_sold_new(term)
+        print("Error:", result["error"])
+        print("Raw prices:", result["raw_prices"])
+        print("Cleaned prices:", result["cleaned_prices"])
+        print("Count:", result["count"])
+        print("Average:", result["average_price"])
+        print("Median:", result["median_price"])
+        print("Min:", result["min_price"])
+        print("Max:", result["max_price"])
