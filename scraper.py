@@ -142,7 +142,7 @@ def get_item_value_sold_new(search_term: str, max_results: int = 5) -> Dict[str,
     html = resp.text
     soup = BeautifulSoup(html, "html.parser")
 
-    # DEBUG: save HTML once if you ever need to inspect layout
+    # DEBUG: saves HTML
     with open("ebay_debug.html", "w", encoding="utf-8") as f:
         f.write(html)
 
