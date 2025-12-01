@@ -230,7 +230,7 @@ def get_item_value_sold_new(search_term: str, max_results: int = 5) -> Dict[str,
 # ------------ quick test harness ------------
 
 if __name__ == "__main__":
-    test_terms = ["iphone 11", "ps4 controller", "pokemon emerald"]
+    test_terms = ["iphone 12", "jordan 1", "pokemon etb"]
 
     for term in test_terms:
         print("==========")
