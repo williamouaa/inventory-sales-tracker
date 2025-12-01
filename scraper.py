@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 # Matches things like: $9.99, US $129.99, $1,234.56, 99.00, etc.
 PRICE_PATTERN = re.compile(r"(?:US\s*)?\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?")
 
-# Common accessory / junk keywords to skip
+# Common accessorries / junk 
 ACCESSORY_KEYWORDS = [
     "case",
     "charger",
@@ -36,7 +36,7 @@ ACCESSORY_KEYWORDS = [
     "charging pad",
 ]
 
-# Very common words we ignore when matching query to title
+# common words to ignore
 QUERY_STOPWORDS = {"for", "the", "a", "an", "and", "or", "new", "brand"}
 
 
@@ -227,7 +227,7 @@ def get_item_value_sold_new(search_term: str, max_results: int = 5) -> Dict[str,
     }
 
 
-# ------------ quick test harness ------------
+# -------- test ----------
 
 if __name__ == "__main__":
     test_terms = ["iphone 12", "jordan 1", "pokemon etb"]
