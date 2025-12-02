@@ -164,7 +164,6 @@ def get_item_value_sold_new(search_term: str, max_results: int = 5) -> Dict[str,
 
     for idx, li in enumerate(listings):
         # --- Title extraction ---
-        # Strategy: first <a> with an /itm/ link (that should be the listing title)
         title_link = li.select_one("a[href*='/itm/']")
         if not title_link:
             continue
